@@ -34,12 +34,6 @@ curl -sL -o skills/utxo_wallet/scripts/api-call.cjs \
   https://raw.githubusercontent.com/DavidYashar/utxo-wallet/main/scripts/api-call.cjs
 ```
 
-### Via ClawHub
-
-```bash
-npx clawhub install utxo-wallet
-```
-
 ### After installing
 
 Set environment variables:
