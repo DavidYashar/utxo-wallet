@@ -1,6 +1,6 @@
 ---
 name: utxo_wallet
-version: 1.1.0
+version: 1.2.0
 description: Full UTXO Exchange agent skill — wallet connect, deposit, explore trending tokens, token launch, swap (buy/sell). Everything an AI agent needs.
 license: MIT
 repository: https://github.com/DavidYashar/utxo-wallet
@@ -20,7 +20,7 @@ metadata:
           description: "AES-256-GCM decryption key for .wallet.json"
           sensitive: true
         - path: .session.json
-          description: "Session token + connected address (expires after 15 min idle)"
+          description: "Session token + connected address (15 min idle timeout, 2 hour hard expiry)"
           sensitive: true
 ---
 
@@ -44,11 +44,6 @@ mkdir -p skills/utxo_wallet/scripts
 curl -sL -o skills/utxo_wallet/SKILL.md https://raw.githubusercontent.com/DavidYashar/utxo-wallet/main/SKILL.md
 curl -sL -o skills/utxo_wallet/scripts/wallet-connect.cjs https://raw.githubusercontent.com/DavidYashar/utxo-wallet/main/scripts/wallet-connect.cjs
 curl -sL -o skills/utxo_wallet/scripts/api-call.cjs https://raw.githubusercontent.com/DavidYashar/utxo-wallet/main/scripts/api-call.cjs
-```
-
-**Via ClawHub:**
-```
-npx clawhub install utxo-wallet
 ```
 
 After installing, set these environment variables:
@@ -84,7 +79,7 @@ Flags:
 
 | Method | Endpoint | Auth | Purpose |
 |--------|----------|------|---------|
-| GET | `/api/agent/wallet/balance` | No | Check sats balance + token holdings |
+| GET | `/api/agent/wallet/balance` | Bearer | Check sats balance + token holdings |
 | GET | `/api/agent/trending` | No | Discover trending tokens (new pairs, migrating, migrated) with optional sort |
 | GET | `/api/agent/token/info?address=X` | No | Get detailed info on a specific token |
 | POST | `/api/agent/token/launch` | Bearer | Create a new token (single-step) |
@@ -140,17 +135,18 @@ If any API returns **HTTP 401**, run wallet-connect.cjs again and retry.
 ## Step 2: Check Balance
 
 ```
-exec node skills/utxo_wallet/scripts/api-call.cjs GET /api/agent/wallet/balance
+exec node skills/utxo_wallet/scripts/api-call.cjs GET /api/agent/wallet/balance --auth
 ```
 
 Response:
 ```json
 {
-  "ok": true,
+  "success": true,
+  "network": "MAINNET",
   "address": "spark1...",
   "balance_sats": 150000,
   "token_holdings": [
-    { "token_id": "btkn1...", "balance": "1000000000" }
+    { "token_address": "btkn1...", "balance": "1000000000" }
   ]
 }
 ```
@@ -214,6 +210,8 @@ exec node skills/utxo_wallet/scripts/api-call.cjs GET "/api/agent/token/info?add
 
 Returns: name, ticker, supply, decimals, price, pool info, holder count, bonding progress, and more.
 
+> **Tip:** Use `address=BTC` to get Bitcoin info as the native asset (returns hardcoded Bitcoin metadata with `is_native: true`).
+
 ---
 
 ## Step 3: Fund Wallet
@@ -255,7 +253,11 @@ Response:
     "announce_tx_id": "...",
     "mint_tx_id": "...",
     "trade_url": "https://utxo.fun/token/btkn1...",
-    "issuer_address": "spark1..."
+    "explorer_url": "https://...",
+    "issuer_address": "spark1...",
+    "issuer_public_key": "02...",
+    "initial_buy": { "accepted": true, "amountOut": "5000000" },
+    "metadata": { "bio": "...", "x": "...", "website": "...", "telegram": "...", "imageUrl": "...", "persisted": true }
   }
 }
 ```
@@ -269,7 +271,7 @@ Response:
 Before any buy or sell, always:
 
 1. **Check balance first** — call `GET /api/agent/wallet/balance` to confirm you have enough sats (for buy) or tokens (for sell).
-2. **Use token_holdings** — the balance response includes a `token_holdings` array. Each entry has `token_id` and `balance` (in base units). Use this to determine sell amounts and verify you actually hold the token.
+2. **Use token_holdings** — the balance response includes a `token_holdings` array. Each entry has `token_address` and `balance` (in base units). Use this to determine sell amounts and verify you actually hold the token.
 
 ---
 
@@ -293,11 +295,13 @@ Response:
   "result": {
     "type": "swap",
     "action": "buy",
-    "token": "btkn1...",
-    "amount_in": "1000",
-    "amount_out": "500000000",
-    "tx_id": "...",
-    "pool_id": "..."
+    "token_address": "btkn1...",
+    "amount_in": 1000,
+    "amount_out": 500000000,
+    "expected_output": 500000000,
+    "price_per_token": 0.000002,
+    "recipient_address": "spark1...",
+    "outbound_transfer_id": "..."
   }
 }
 ```
@@ -326,16 +330,22 @@ Response:
   "result": {
     "type": "swap",
     "action": "sell",
-    "token": "btkn1...",
-    "amount_in": "500000000",
-    "amount_out": "980",
-    "tx_id": "...",
-    "pool_id": "..."
+    "token_address": "btkn1...",
+    "amount_in": 500000000,
+    "amount_out": 980,
+    "expected_output": 980,
+    "price_per_token": 0.00000196,
+    "recipient_address": "spark1...",
+    "outbound_transfer_id": "..."
   }
 }
 ```
 
 The agent's session wallet swaps tokens for BTC sats directly on the AMM. Sats land in the wallet immediately.
+
+> **Alternative swap format:** Instead of `token` + `action`, you can use `input_token` and `output_token`:
+> - Buy: `{"input_token": "BTC", "output_token": "btkn1...", "amount": 1000}`
+> - Sell: `{"input_token": "btkn1...", "output_token": "BTC", "amount": 500000000}`
 
 ---
 
@@ -395,8 +405,10 @@ Response:
 ## Session Rules
 
 - **Idle timeout**: 15 minutes with no API calls → session expires
+- **Hard expiry**: 2 hours after creation, regardless of activity → session expires, reconnect required
+- **Max concurrent sessions**: Server allows up to 50 active sessions (LRU eviction removes oldest idle session when full)
 - **One session per agent**: Connecting again replaces the previous session
-- **Server restart**: All sessions are cleared — just reconnect
+- **Server restart**: All sessions are cleared (in-memory storage) — just reconnect
 - **401 = reconnect**: If any API returns 401, run wallet-connect.cjs and retry
 
 ## Error Handling
@@ -408,7 +420,19 @@ Response:
 | Insufficient balance | Transfer sats to the agent's spark_address, then check balance |
 | Swap fails | Tokens/sats remain in your wallet — check balance and retry |
 | Launch fails | Report the exact error to the user and retry |
-| Unknown token_id | Check balance → `token_holdings` to get the correct token_id before trading |
+| Unknown token_address | Check balance → `token_holdings` to get the correct token_address before trading |
+
+### Error Codes by Endpoint
+
+All error responses follow the format: `{ "success": false, "error": { "code": "...", "message": "..." } }`
+
+| Endpoint | Error Codes |
+|----------|-------------|
+| `/api/agent/wallet/balance` | `AUTH_ERROR`, `BALANCE_ERROR` |
+| `/api/agent/token/info` | `MISSING_PARAM`, `INVALID_ADDRESS`, `NOT_FOUND`, `INTERNAL_ERROR` |
+| `/api/agent/token/launch` | `AUTH_REQUIRED`, `INVALID_NAME`, `INVALID_TICKER`, `INVALID_SUPPLY`, `INVALID_DECIMALS`, `INVALID_BIO`, `INVALID_X`, `INVALID_WEBSITE`, `INVALID_TELEGRAM`, `INVALID_INITIAL_BUY`, `LAUNCH_FAILED` |
+| `/api/agent/swap` | `MISSING_PARAM`, `INVALID_ACTION`, `INVALID_AMOUNT`, `AUTH_REQUIRED`, `POOL_NOT_FOUND`, `AMOUNT_TOO_LOW`, `SIMULATION_FAILED`, `SWAP_REJECTED`, `INTERNAL_ERROR` |
+| `/api/agent/chat/message` | `AUTH_REQUIRED`, `MISSING_PARAM`, `MESSAGE_TOO_LONG`, `INTERNAL_ERROR` |
 
 ## Security Rules
 
