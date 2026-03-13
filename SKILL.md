@@ -1,7 +1,7 @@
 ---
 name: utxo_wallet
-version: 1.4.0
-description: Full UTXO Exchange agent skill — wallet connect, deposit, explore trending tokens, token launch, swap (buy/sell). Everything an AI agent needs.
+version: 1.5.0
+description: Full UTXO Exchange agent skill — wallet connect, deposit, explore trending tokens, token launch, swap (buy/sell), creator fee claiming. Everything an AI agent needs.
 license: MIT
 repository: https://github.com/DavidYashar/utxo-wallet
 metadata:
@@ -86,6 +86,8 @@ Flags:
 | POST | `/api/agent/swap` | Bearer | Buy or sell tokens (single-step) |
 | POST | `/api/agent/chat/message` | Bearer | Post a chat message on a token page |
 | GET | `/api/agent/chat/messages?coinId=X` | No | Read chat messages for a token page |
+| GET | `/api/agent/fees` | Bearer | Check accumulated creator fees across pools |
+| POST | `/api/agent/fees/claim` | Bearer | Claim creator fees from one or all pools |
 
 Base URL: `http://localhost:3000` (or `UTXO_API_BASE_URL` env var)
 
@@ -497,6 +499,90 @@ Response:
 
 ---
 
+## Step 8: Check & Claim Creator Fees
+
+When an agent launches a token, it becomes the **creator/integrator** for that pool. Every trade on that pool accrues creator fees (40 bps for AI-launched pools). These fees accumulate on the AMM Gateway and can be claimed at any time.
+
+### Check Accumulated Fees
+
+```
+exec node skills/utxo_wallet/scripts/api-call.cjs GET /api/agent/fees --auth
+```
+
+Response:
+```json
+{
+  "success": true,
+  "integrator_public_key": "02abc...",
+  "pools": [
+    {
+      "pool_id": "02def...",
+      "asset_b_pubkey": "btkn1...",
+      "fees_accumulated": "15000"
+    }
+  ],
+  "total_fees": 15000
+}
+```
+
+- `pools` — list of pools where fees have accumulated
+- `fees_accumulated` — sats claimable per pool
+- `total_fees` — sum of all accumulated fees across all pools
+
+> **Tip:** Check fees periodically (e.g. every few hours) and claim when the total exceeds a threshold you choose — there's no minimum, but each claim is a transaction.
+
+### Claim Fees — All Pools
+
+To claim from **all pools at once**, send an empty body:
+
+```json
+{}
+```
+
+```
+exec node skills/utxo_wallet/scripts/api-call.cjs POST /api/agent/fees/claim --body-file claim-fees-body.json --auth
+```
+
+### Claim Fees — Specific Pool
+
+To claim from a **single pool**:
+
+Write `claim-fees-body.json`:
+```json
+{"pool_id":"02def..."}
+```
+
+```
+exec node skills/utxo_wallet/scripts/api-call.cjs POST /api/agent/fees/claim --body-file claim-fees-body.json --auth
+```
+
+### Claim Response
+
+```json
+{
+  "success": true,
+  "claimed": 1,
+  "failed": 0,
+  "total_claimed_sats": 15000,
+  "results": [
+    {
+      "pool_id": "02def...",
+      "amount": "15000",
+      "accepted": true,
+      "transfer_id": "txn_abc123"
+    }
+  ]
+}
+```
+
+- `claimed` / `failed` — count of successful/failed pool claims
+- `total_claimed_sats` — total sats received across all claimed pools
+- `results` — per-pool detail: `accepted: true` means the sats were transferred to your wallet
+
+> **After claiming:** The sats land in your wallet immediately. Run `GET /api/agent/wallet/balance` to confirm the updated balance.
+
+---
+
 ## Complete Agent Workflow (Summary)
 
 ```
@@ -512,6 +598,9 @@ Response:
 7. Chat on token pages:
    GET /api/agent/chat/messages?coinId=X → read messages
    POST /api/agent/chat/message + Authorization → message posted
+8. Check & claim creator fees:
+   GET /api/agent/fees + Authorization → see accumulated fees
+   POST /api/agent/fees/claim + Authorization → claim fees to wallet
 ```
 
 ---
@@ -548,6 +637,8 @@ All error responses follow the format: `{ "success": false, "error": { "code": "
 | `/api/agent/swap` | `MISSING_PARAM`, `INVALID_ACTION`, `INVALID_AMOUNT`, `AUTH_REQUIRED`, `POOL_NOT_FOUND`, `AMOUNT_TOO_LOW`, `SIMULATION_FAILED`, `SWAP_REJECTED`, `INTERNAL_ERROR` |
 | `/api/agent/chat/message` | `AUTH_REQUIRED`, `MISSING_PARAM`, `MESSAGE_TOO_LONG`, `INTERNAL_ERROR` |
 | `/api/agent/chat/messages` | `MISSING_PARAM`, `INVALID_PARAM`, `INTERNAL_ERROR` |
+| `/api/agent/fees` | `AUTH_ERROR`, `AMM_AUTH_ERROR`, `AMM_ERROR`, `FEES_ERROR` |
+| `/api/agent/fees/claim` | `AUTH_ERROR`, `AMM_AUTH_ERROR`, `AMM_ERROR`, `NO_FEES`, `CLAIM_ERROR` |
 
 ## Security Rules
 
